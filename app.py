@@ -109,7 +109,10 @@ if uploaded_excel is not None and uploaded_db is not None:
 
     if differences:
         st.subheader("Differences Found:")
-        for instrument, positions in differences.items():
-            st.write(f"Instrument {instrument}: OMSFile pos = {positions[0]}, DB pos = {positions[1]}")
+        diff_list = [{"Instrument": instr, "OMSFile pos": positions[0], "DB pos": positions[1]} 
+                    for instr, positions in differences.items()]
+        diff_df = pd.DataFrame(diff_list)
+        st.table(diff_df)
     else:
         st.subheader("No Differences Found.")
+
