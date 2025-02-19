@@ -1,34 +1,36 @@
+import streamlit as st
 import pandas as pd
 from datetime import datetime
 import csv
-import streamlit as st
 from openpyxl import load_workbook
+from io import BytesIO, StringIO
 
-st.title("Position Mismatch Checker")
+st.title("Net Position Processor & Comparator")
 
-# Upload files via Streamlit
-file1 = st.file_uploader("Upload NetPosition Excel File (xlsx)", type=["xlsx"])
-file2 = st.file_uploader("Upload Database CSV File", type=["csv"])
+# Upload the two required files
+uploaded_excel = st.file_uploader("Upload NetPosition Excel File (.xlsx)", type=["xlsx"])
+uploaded_db = st.file_uploader("Upload Comparison CSV File (.csv)", type=["csv"])
 
-if file1 and file2:
-    # Process first file (Remove first row & convert to CSV)
-    workbook = load_workbook(file1)
+if uploaded_excel is not None and uploaded_db is not None:
+    # --- FIRST ROW REMOVE CODE ---
+    # Read the uploaded Excel file into openpyxl
+    excel_bytes = uploaded_excel.read()
+    workbook = load_workbook(filename=BytesIO(excel_bytes))
     sheet = workbook.active
     sheet.delete_rows(1)
-    
-    output_xl_file = "NetPositionToday.xlsx"
-    workbook.save(output_xl_file)
-    
-    st.success("First row removed. Cleaned file saved.")
+    output_excel_io = BytesIO()
+    workbook.save(output_excel_io)
+    st.success("First row removed from Excel file.")
 
-    # Convert Excel to CSV
-    df = pd.read_excel(output_xl_file)
-    df.to_csv("NetPosition.csv", index=False)
-    
-    st.write("Converted Excel to CSV:")
-    st.dataframe(df.head())
+    # --- CONVERT EXCEL TO CSV ---
+    output_excel_io.seek(0)
+    df_excel = pd.read_excel(output_excel_io)
+    csv_buffer = StringIO()
+    df_excel.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
+    df = pd.read_csv(StringIO(csv_buffer.getvalue()))
 
-    # Function to generate formatted name
+    # --- GENERATE FORMATTED NAMES ---
     def generate_name(row):
         ticker = row["Scrip"]
         exp_date = row["Exp Date"]
@@ -39,48 +41,55 @@ if file1 and file2:
             exp_year = exp_date_obj.strftime("%y")
             exp_month = exp_date_obj.strftime("%b").upper()
         except ValueError:
-            return "Invalid Date"
+            raise ValueError("Invalid date format: {}. Expected format is DD-MM-YYYY.".format(exp_date))
+        if call_put == "FF":
+            suffix = "FUT"
+            formatted_strike = ""
+        else:
+            suffix = call_put
+            formatted_strike = str(int(float(strike))) if float(strike).is_integer() else str(float(strike))
+        return "{ticker}{year}{month}{strike}{suffix}".format(
+            ticker=ticker, year=exp_year, month=exp_month, strike=formatted_strike, suffix=suffix
+        )
 
-        suffix = "FUT" if call_put == "FF" else call_put
-        formatted_strike = str(int(float(strike))) if float(strike).is_integer() else str(float(strike))
+    df["Formatted Name with Qty"] = df.apply(
+        lambda row: "{},{}".format(generate_name(row), int(row["Net Qty"])), axis=1
+    )
 
-        return f"{ticker}{exp_year}{exp_month}{formatted_strike}{suffix}"
-
-    # Generate formatted names
-    df["Formatted Name with Qty"] = df.apply(lambda row: f"{generate_name(row)},{int(row['Net Qty'])}", axis=1)
-    
-    # Save formatted CSV
+    # --- SAVE FORMATTED CSV ---
     formatted_output = "formatted_names_with_qty.csv"
-    df.to_csv(formatted_output, columns=["Formatted Name with Qty"], index=False, quoting=csv.QUOTE_NONE)
+    formatted_csv_io = StringIO()
+    df.to_csv(formatted_csv_io, columns=["Formatted Name with Qty"], index=False, quoting=csv.QUOTE_NONE, escapechar=" ")
+    st.success("Formatted names with quantities generated.")
 
-    st.success("Formatted names generated.")
-    st.download_button("Download Formatted CSV", open(formatted_output, "rb"), formatted_output)
-
-    # Clean CSV file (Remove extra spaces)
-    cleaned_output = "formatted_name_c1.csv"
-    with open(formatted_output, "r") as infile, open(cleaned_output, "w", newline="") as outfile:
-        reader = csv.reader(infile)
-        writer = csv.writer(outfile)
-        next(reader, None)
-        for row in reader:
-            writer.writerow([cell.strip() for cell in row])
-
+    # --- CLEAN CSV FILE CODE ---
+    formatted_csv_io.seek(0)
+    input_csv_io = StringIO(formatted_csv_io.getvalue())
+    cleaned_csv_io = StringIO()
+    reader = csv.reader(input_csv_io)
+    writer = csv.writer(cleaned_csv_io)
+    next(reader, None)
+    for row in reader:
+        cleaned_row = [cell.strip() for cell in row]
+        writer.writerow(cleaned_row)
     st.success("Extra spaces removed from CSV.")
 
-    # Compare positions
-    def read_file(file):
+    # --- COMPARE INSTRUMENTS AND QUANTITY CODE ---
+    def read_file(file_str):
         data = {}
-        with open(file, 'r') as f:
-            for line in f:
-                parts = line.strip().split(',')
-                if len(parts) == 2:
-                    instrument, position = parts
-                    data[instrument.strip()] = int(position.strip())
+        for line in file_str.splitlines():
+            instrument, position = line.strip().split(',')
+            data[instrument.strip()] = int(position.strip())
         return data
 
-    # Read second uploaded file for comparison
-    p1_data = read_file(cleaned_output)
-    p2_data = read_file(file2)
+    # p1_data comes from the cleaned CSV output
+    cleaned_csv_io.seek(0)
+    p1_data = read_file(cleaned_csv_io.getvalue())
+
+    # p2_data comes from the uploaded comparison CSV file
+    db_bytes = uploaded_db.read()
+    db_str = db_bytes.decode("utf-8")
+    p2_data = read_file(db_str)
 
     def compare_positions(p1_data, p2_data):
         differences = {}
@@ -99,9 +108,8 @@ if file1 and file2:
     differences = compare_positions(p1_data, p2_data)
 
     if differences:
-        st.warning("Differences found!")
-        diff_df = pd.DataFrame.from_dict(differences, orient='index', columns=["OMS File Pos", "DB Pos"])
-        st.dataframe(diff_df)
+        st.subheader("Differences Found:")
+        for instrument, positions in differences.items():
+            st.write(f"Instrument {instrument}: OMSFile pos = {positions[0]}, DB pos = {positions[1]}")
     else:
-        st.success("No differences found!")
-
+        st.subheader("No Differences Found.")
